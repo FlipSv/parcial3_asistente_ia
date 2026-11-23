@@ -3,7 +3,7 @@ import { storageService } from './storageService';
 /**
  * Motor de Inteligencia Artificial para el Asistente Personal Nova
  * Ofrece soporte híbrido:
- * 1. Google Gemini API (Modo Nube)
+ * 1. Google Gemini API (Interactions API moderna + GenerateContent clásica)
  * 2. Ollama Local API (Modo Local LLM)
  * 3. Motor Contextual Inteligente NLP Integrado (Modo Offline / Autónomo)
  */
@@ -54,7 +54,7 @@ export const aiEngine = {
         console.warn('Gemini API call failed:', err);
         const fallbackReply = this.generateContextualResponse(trimmed, settings, existingTasks, createdTask);
         return {
-          reply: `⚠️ [Error al conectar con Google Gemini: ${err.message}]\n\n[Respondiendo con motor local]:\n\n${fallbackReply}`,
+          reply: `⚠️ [Error Google Gemini: ${err.message}]\n\n[Respondiendo con motor local]:\n\n${fallbackReply}`,
           createdTask,
         };
       }
@@ -84,7 +84,24 @@ export const aiEngine = {
   },
 
   /**
-   * Probar conexión con Google Gemini API
+   * Helper para extraer texto de respuesta de la Interactions API
+   */
+  extractTextFromInteraction(data) {
+    if (data?.steps && Array.isArray(data.steps)) {
+      for (const step of data.steps) {
+        if (step.content && Array.isArray(step.content)) {
+          for (const c of step.content) {
+            if (c.text) return c.text;
+          }
+        }
+      }
+    }
+    if (typeof data?.output === 'string') return data.output;
+    return null;
+  },
+
+  /**
+   * Probar conexión con Google Gemini API (soporta Interactions API y GenerateContent)
    */
   async testGeminiConnection(apiKey) {
     const cleanKey = (apiKey || '').trim().replace(/[\r\n\t]/g, '');
@@ -92,22 +109,61 @@ export const aiEngine = {
       return { success: false, message: 'La clave API está vacía.' };
     }
 
-    const models = [
-      'gemini-3.0-flash',
-      'gemini-3.8-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-    ];
     let lastError = '';
 
-    for (const model of models) {
+    // 1. Probar primero la nueva Interactions API (recomendada por Google AI Studio)
+    const interactionModels = [
+      'models/gemini-2.5-flash-lite',
+      'models/gemini-3.1-flash-lite',
+      'models/gemini-3.5-flash',
+    ];
+
+    for (const model of interactionModels) {
+      const url = `https://generativelanguage.googleapis.com/v1/interactions?key=${cleanKey}`;
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            input: 'Responde una sola palabra: OK',
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const reply = this.extractTextFromInteraction(data) || 'OK';
+          return {
+            success: true,
+            model,
+            message: `¡Conexión exitosa con Google Gemini (${model.replace('models/', '')})! Respuesta: "${reply.trim()}"`,
+          };
+        } else {
+          const errData = await res.json().catch(() => null);
+          const rawMsg = errData?.[0]?.error?.message || errData?.error?.message || `HTTP ${res.status}`;
+          lastError = rawMsg;
+          if (res.status === 400 && rawMsg.includes('API_KEY_INVALID')) {
+            return {
+              success: false,
+              message: `Clave API inválida. Asegúrate de copiarla de Google AI Studio (aistudio.google.com). Detalle: ${rawMsg}`,
+            };
+          }
+        }
+      } catch (e) {
+        lastError = e.message || 'Error de red';
+      }
+    }
+
+    // 2. Si falló la Interactions API, probar GenerateContent clásico
+    const classicModels = ['gemini-3.0-flash', 'gemini-3.8-flash', 'gemini-1.5-flash'];
+    for (const model of classicModels) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
       try {
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Responde únicamente la palabra: OK' }] }],
+            contents: [{ parts: [{ text: 'Responde: OK' }] }],
           }),
         });
 
@@ -117,94 +173,99 @@ export const aiEngine = {
           return {
             success: true,
             model,
-            message: `¡Conexión exitosa con Google Gemini (${model})! Respuesta del modelo: "${reply.trim()}"`,
+            message: `¡Conexión exitosa con Google Gemini (${model})! Respuesta: "${reply.trim()}"`,
           };
         } else {
           const errData = await res.json().catch(() => null);
-          const msg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-          lastError = msg;
-          // If key is totally invalid, exit early
-          if (res.status === 400 && msg.includes('API_KEY_INVALID')) {
-            return {
-              success: false,
-              message: `Clave API inválida. Asegúrate de que sea generada en Google AI Studio (aistudio.google.com). Detalle: ${msg}`,
-            };
-          }
-          // If model is retired or not found, try the next one in the list
+          const rawMsg = errData?.error?.message || `HTTP ${res.status}`;
+          lastError = rawMsg;
         }
       } catch (netErr) {
-        lastError = netErr.message || 'Error de red o conexión al servidor de Google';
+        lastError = netErr.message || 'Error de red';
       }
     }
 
     return {
       success: false,
-      message: `No se pudo conectar con los modelos de Gemini. Detalle: ${lastError}`,
+      message: `No se pudo conectar con Gemini. Detalle: ${lastError}`,
     };
   },
 
   /**
-   * Llamada a Google Gemini API con reintentos en modelos compatibles
+   * Llamada a Google Gemini API (Interactions API con fallback a GenerateContent)
    */
   async callGeminiApi(prompt, cleanKey, settings, tasks, createdTask) {
-    const models = [
-      'gemini-3.0-flash',
-      'gemini-3.8-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-    ];
     const systemInstruction = `Eres "Nova", un asistente personal inteligente para dispositivos móviles desarrollado para estudiantes y profesionales de la UDI.
 Usuario actual: ${settings.userName} (${settings.userRole}).
 Tono: ${settings.aiTone}.
-Tareas actuales del usuario: ${JSON.stringify(tasks.slice(0, 5))}.
-${createdTask ? `Acabas de crear la tarea: "${createdTask.title}". Confírmala amablemente al usuario.` : ''}
+Tareas actuales: ${JSON.stringify(tasks.slice(0, 5))}.
+${createdTask ? `Acabas de crear la tarea: "${createdTask.title}".` : ''}
 Responde de manera estructurada, cordial y orientada a la productividad. Máximo 150 palabras.`;
 
-    const requestBody = {
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: `${systemInstruction}\n\nMensaje del usuario: ${prompt}` }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 300,
-      },
-    };
-
+    const fullPrompt = `${systemInstruction}\n\nPregunta del usuario: ${prompt}`;
     let lastError = '';
 
-    for (const model of models) {
+    // 1. Intentar Interactions API primero
+    const interactionModels = [
+      'models/gemini-2.5-flash-lite',
+      'models/gemini-3.1-flash-lite',
+      'models/gemini-3.5-flash',
+    ];
+
+    for (const model of interactionModels) {
+      const url = `https://generativelanguage.googleapis.com/v1/interactions?key=${cleanKey}`;
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            input: fullPrompt,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const text = this.extractTextFromInteraction(data);
+          if (text) return text;
+        } else {
+          const errData = await response.json().catch(() => null);
+          const msg = errData?.[0]?.error?.message || errData?.error?.message || `HTTP ${response.status}`;
+          lastError = msg;
+          if (response.status === 400 && msg.includes('API_KEY_INVALID')) {
+            throw new Error(msg);
+          }
+        }
+      } catch (err) {
+        if (err.message && err.message.includes('API_KEY_INVALID')) {
+          throw err;
+        }
+        lastError = err.message;
+      }
+    }
+
+    // 2. Intentar GenerateContent clásico como alternativa
+    const classicModels = ['gemini-3.0-flash', 'gemini-3.8-flash', 'gemini-1.5-flash'];
+    for (const model of classicModels) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
       try {
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: fullPrompt }] }],
+          }),
         });
 
         if (response.ok) {
           const data = await response.json();
-          const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (candidateText) {
-            return candidateText;
-          }
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) return text;
         } else {
           const errData = await response.json().catch(() => null);
-          const msg = errData?.error?.message || `HTTP ${response.status} (${response.statusText})`;
-          lastError = msg;
-          // If model is retired or not found, try the next one in the list
-          if (response.status === 404 || msg.includes('is no longer available') || msg.includes('not found') || msg.includes('not supported')) {
-            continue;
-          }
-          // If invalid key or quota, throw immediately
-          throw new Error(msg);
+          lastError = errData?.error?.message || `HTTP ${response.status}`;
         }
       } catch (err) {
-        if (err.message && !err.message.includes('404') && !err.message.includes('is no longer available')) {
-          throw err;
-        }
         lastError = err.message;
       }
     }
