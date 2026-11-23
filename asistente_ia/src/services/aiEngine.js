@@ -92,7 +92,12 @@ export const aiEngine = {
       return { success: false, message: 'La clave API está vacía.' };
     }
 
-    const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+    const models = [
+      'gemini-3.0-flash',
+      'gemini-3.8-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+    ];
     let lastError = '';
 
     for (const model of models) {
@@ -112,19 +117,20 @@ export const aiEngine = {
           return {
             success: true,
             model,
-            message: `¡Conexión exitosa con Google Gemini (${model})! Respuesta: "${reply.trim()}"`,
+            message: `¡Conexión exitosa con Google Gemini (${model})! Respuesta del modelo: "${reply.trim()}"`,
           };
         } else {
           const errData = await res.json().catch(() => null);
           const msg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
           lastError = msg;
-          // If key is invalid, don't try other models
+          // If key is totally invalid, exit early
           if (res.status === 400 && msg.includes('API_KEY_INVALID')) {
             return {
               success: false,
               message: `Clave API inválida. Asegúrate de que sea generada en Google AI Studio (aistudio.google.com). Detalle: ${msg}`,
             };
           }
+          // If model is retired or not found, try the next one in the list
         }
       } catch (netErr) {
         lastError = netErr.message || 'Error de red o conexión al servidor de Google';
@@ -141,7 +147,12 @@ export const aiEngine = {
    * Llamada a Google Gemini API con reintentos en modelos compatibles
    */
   async callGeminiApi(prompt, cleanKey, settings, tasks, createdTask) {
-    const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+    const models = [
+      'gemini-3.0-flash',
+      'gemini-3.8-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+    ];
     const systemInstruction = `Eres "Nova", un asistente personal inteligente para dispositivos móviles desarrollado para estudiantes y profesionales de la UDI.
 Usuario actual: ${settings.userName} (${settings.userRole}).
 Tono: ${settings.aiTone}.
@@ -183,15 +194,15 @@ Responde de manera estructurada, cordial y orientada a la productividad. Máximo
           const errData = await response.json().catch(() => null);
           const msg = errData?.error?.message || `HTTP ${response.status} (${response.statusText})`;
           lastError = msg;
-          // If 404 (model not found), continue loop to next model
-          if (response.status === 404) {
+          // If model is retired or not found, try the next one in the list
+          if (response.status === 404 || msg.includes('is no longer available') || msg.includes('not found') || msg.includes('not supported')) {
             continue;
           }
           // If invalid key or quota, throw immediately
           throw new Error(msg);
         }
       } catch (err) {
-        if (err.message && !err.message.includes('404')) {
+        if (err.message && !err.message.includes('404') && !err.message.includes('is no longer available')) {
           throw err;
         }
         lastError = err.message;
