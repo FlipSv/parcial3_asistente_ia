@@ -17,7 +17,7 @@ export const aiEngine = {
       };
     }
 
-    // 1. First, check if intent is to create or record a task
+    // 1. Detect task creation intent
     const taskIntent = this.detectTaskCreationIntent(trimmed);
     let createdTask = null;
 
@@ -32,19 +32,29 @@ export const aiEngine = {
     }
 
     // 2. Route according to selected AI engine
-    if (settings.aiEngine === 'gemini' && settings.geminiApiKey) {
+    if (settings.aiEngine === 'gemini') {
+      const rawKey = settings.geminiApiKey || '';
+      const cleanKey = rawKey.trim().replace(/[\r\n\t]/g, '');
+
+      if (!cleanKey) {
+        const fallbackReply = this.generateContextualResponse(trimmed, settings, existingTasks, createdTask);
+        return {
+          reply: `⚠️ [Configuración Gemini Incompleta]\nNo has ingresado una clave API en la pestaña de Ajustes.\n\n[Respondiendo con motor local]:\n\n${fallbackReply}`,
+          createdTask,
+        };
+      }
+
       try {
-        const geminiReply = await this.callGeminiApi(trimmed, settings, existingTasks, createdTask);
+        const geminiReply = await this.callGeminiApi(trimmed, cleanKey, settings, existingTasks, createdTask);
         return {
           reply: geminiReply,
           createdTask,
         };
       } catch (err) {
-        console.warn('Gemini API call failed, falling back to Contextual Engine:', err);
-        // Graceful fallback to Contextual Engine
+        console.warn('Gemini API call failed:', err);
         const fallbackReply = this.generateContextualResponse(trimmed, settings, existingTasks, createdTask);
         return {
-          reply: `[Nota: Conexión Gemini no disponible, respondiendo con motor local]\n\n${fallbackReply}`,
+          reply: `⚠️ [Error al conectar con Google Gemini: ${err.message}]\n\n[Respondiendo con motor local]:\n\n${fallbackReply}`,
           createdTask,
         };
       }
@@ -59,7 +69,7 @@ export const aiEngine = {
         console.warn('Ollama API call failed, falling back to Contextual Engine:', err);
         const fallbackReply = this.generateContextualResponse(trimmed, settings, existingTasks, createdTask);
         return {
-          reply: `[Nota: Ollama local no alcanzable, respondiendo con motor local]\n\n${fallbackReply}`,
+          reply: `⚠️ [Error Ollama Local: ${err.message}]\n\n[Respondiendo con motor local]:\n\n${fallbackReply}`,
           createdTask,
         };
       }
@@ -71,6 +81,124 @@ export const aiEngine = {
       reply: localReply,
       createdTask,
     };
+  },
+
+  /**
+   * Probar conexión con Google Gemini API
+   */
+  async testGeminiConnection(apiKey) {
+    const cleanKey = (apiKey || '').trim().replace(/[\r\n\t]/g, '');
+    if (!cleanKey) {
+      return { success: false, message: 'La clave API está vacía.' };
+    }
+
+    const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+    let lastError = '';
+
+    for (const model of models) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Responde únicamente la palabra: OK' }] }],
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'OK';
+          return {
+            success: true,
+            model,
+            message: `¡Conexión exitosa con Google Gemini (${model})! Respuesta: "${reply.trim()}"`,
+          };
+        } else {
+          const errData = await res.json().catch(() => null);
+          const msg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+          lastError = msg;
+          // If key is invalid, don't try other models
+          if (res.status === 400 && msg.includes('API_KEY_INVALID')) {
+            return {
+              success: false,
+              message: `Clave API inválida. Asegúrate de que sea generada en Google AI Studio (aistudio.google.com). Detalle: ${msg}`,
+            };
+          }
+        }
+      } catch (netErr) {
+        lastError = netErr.message || 'Error de red o conexión al servidor de Google';
+      }
+    }
+
+    return {
+      success: false,
+      message: `No se pudo conectar con los modelos de Gemini. Detalle: ${lastError}`,
+    };
+  },
+
+  /**
+   * Llamada a Google Gemini API con reintentos en modelos compatibles
+   */
+  async callGeminiApi(prompt, cleanKey, settings, tasks, createdTask) {
+    const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+    const systemInstruction = `Eres "Nova", un asistente personal inteligente para dispositivos móviles desarrollado para estudiantes y profesionales de la UDI.
+Usuario actual: ${settings.userName} (${settings.userRole}).
+Tono: ${settings.aiTone}.
+Tareas actuales del usuario: ${JSON.stringify(tasks.slice(0, 5))}.
+${createdTask ? `Acabas de crear la tarea: "${createdTask.title}". Confírmala amablemente al usuario.` : ''}
+Responde de manera estructurada, cordial y orientada a la productividad. Máximo 150 palabras.`;
+
+    const requestBody = {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `${systemInstruction}\n\nMensaje del usuario: ${prompt}` }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 300,
+      },
+    };
+
+    let lastError = '';
+
+    for (const model of models) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (candidateText) {
+            return candidateText;
+          }
+        } else {
+          const errData = await response.json().catch(() => null);
+          const msg = errData?.error?.message || `HTTP ${response.status} (${response.statusText})`;
+          lastError = msg;
+          // If 404 (model not found), continue loop to next model
+          if (response.status === 404) {
+            continue;
+          }
+          // If invalid key or quota, throw immediately
+          throw new Error(msg);
+        }
+      } catch (err) {
+        if (err.message && !err.message.includes('404')) {
+          throw err;
+        }
+        lastError = err.message;
+      }
+    }
+
+    throw new Error(lastError || 'No se obtuvo respuesta de los modelos de Gemini.');
   },
 
   /**
@@ -99,7 +227,6 @@ export const aiEngine = {
     for (const trigger of taskTriggers) {
       if (lower.startsWith(trigger) || lower.includes(` ${trigger} `)) {
         isTask = true;
-        // Clean trigger from title
         const idx = lower.indexOf(trigger);
         const rawTitle = text.slice(idx + trigger.length).replace(/^(:|\s+que\s+|\s+de\s+|\s+)/i, '');
         if (rawTitle.length > 2) {
@@ -113,7 +240,6 @@ export const aiEngine = {
       return { isTask: false };
     }
 
-    // Determine category
     let category = 'General';
     if (lower.includes('parcial') || lower.includes('estudiar') || lower.includes('udi') || lower.includes('clase') || lower.includes('examen') || lower.includes('tarea') || lower.includes('proyecto')) {
       category = 'Estudio';
@@ -125,7 +251,6 @@ export const aiEngine = {
       category = 'Personal';
     }
 
-    // Determine priority
     let priority = 'Media';
     if (lower.includes('urgente') || lower.includes('hoy') || lower.includes('importante') || lower.includes('parcial') || lower.includes('ya')) {
       priority = 'Alta';
@@ -133,7 +258,6 @@ export const aiEngine = {
       priority = 'Baja';
     }
 
-    // Due date
     let dueDate = 'Pronto';
     if (lower.includes('hoy')) dueDate = 'Hoy';
     else if (lower.includes('mañana') || lower.includes('manana')) dueDate = 'Mañana';
@@ -156,7 +280,6 @@ export const aiEngine = {
     const userName = settings.userName || 'Usuario';
     const tone = settings.aiTone || 'Empático';
 
-    // If a task was created
     if (createdTask) {
       if (tone === 'Breve y Conciso') {
         return `✅ Tarea registrada: "${createdTask.title}" (${createdTask.priority} - ${createdTask.category}).`;
@@ -167,7 +290,6 @@ export const aiEngine = {
       }
     }
 
-    // Pending tasks query
     if (lower.includes('tarea') || lower.includes('pendiente') || lower.includes('que tengo') || lower.includes('agenda')) {
       const pending = tasks.filter((t) => !t.completed);
       const completed = tasks.filter((t) => t.completed);
@@ -184,7 +306,6 @@ export const aiEngine = {
       return `📋 ${userName}, actualmente tienes ${pending.length} tareas pendientes (${completed.length} completadas):\n\n${listPreview}\n\n¿Quieres que te ayude a priorizar alguna en particular?`;
     }
 
-    // Daily briefing / Resumen del día
     if (lower.includes('resumen') || lower.includes('dia') || lower.includes('día') || lower.includes('cómo voy') || lower.includes('briefing')) {
       const pending = tasks.filter((t) => !t.completed);
       const completed = tasks.filter((t) => t.completed);
@@ -198,7 +319,6 @@ export const aiEngine = {
         `💡 Recuerda: "El éxito no es la velocidad, sino la constancia y el enfoque." ¡Ánimo con tus proyectos de la UDI!`;
     }
 
-    // Study & Productivity tips
     if (lower.includes('estudiar') || lower.includes('consejo') || lower.includes('pomodoro') || lower.includes('concentra') || lower.includes('productiv')) {
       return `💡 Consejos de Productividad Inteligente para ti:\n\n` +
         `1. Técnica Pomodoro: 25 minutos de trabajo sin distracciones + 5 minutos de pausa.\n` +
@@ -208,7 +328,6 @@ export const aiEngine = {
         `¿Deseas que creemos un recordatorio para tu próxima sesión de estudio?`;
     }
 
-    // Parcial / Universidad / UDI
     if (lower.includes('parcial') || lower.includes('móviles') || lower.includes('moviles') || lower.includes('udi')) {
       return `📱 Sobre tu proyecto de Móviles para la UDI:\n\n` +
         `Tu Asistente Nova está diseñado con una arquitectura modular en React Native y Expo, cumpliendo la metodología en Cascada y persistencia local.\n` +
@@ -219,7 +338,6 @@ export const aiEngine = {
         `¡Todo va por excelente camino!`;
     }
 
-    // Greetings
     if (lower.includes('hola') || lower.includes('buenos dias') || lower.includes('buenas tardes') || lower.includes('buenas noches') || lower.includes('hey')) {
       const hour = new Date().getHours();
       let saludo = '¡Hola';
@@ -230,7 +348,6 @@ export const aiEngine = {
       return `${saludo}, ${userName}! ✨ ¿En qué puedo asistirte en este momento? Puedo planear tus pendientes, responder dudas o crear recordatorios automáticos.`;
     }
 
-    // Help & Capabilities
     if (lower.includes('ayuda') || lower.includes('hacer') || lower.includes('comandos') || lower.includes('opciones')) {
       return `🤖 Como tu Asistente Personal con IA puedo ayudarte en:\n\n` +
         `• Crear tareas automáticamente (Ej: "Recuérdame entregar el proyecto hoy a las 11 PM")\n` +
@@ -241,50 +358,7 @@ export const aiEngine = {
         `¿Qué deseas hacer primero?`;
     }
 
-    // General Fallback
     return `Comprendo tu mensaje sobre "${text}". Como asistente inteligente, te recomiendo organizar tus prioridades y registrar cualquier compromiso pendiente. Si quieres que guarde esto como una tarea en tu agenda, solo dímelo ("Recuérdame...").`;
-  },
-
-  /**
-   * Integración directa con Google Gemini API
-   */
-  async callGeminiApi(prompt, settings, tasks, createdTask) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${settings.geminiApiKey}`;
-
-    const systemInstruction = `Eres "Nova", un asistente personal inteligente para dispositivos móviles desarrollado para estudiantes y profesionales.
-Usuario actual: ${settings.userName} (${settings.userRole}).
-Tono: ${settings.aiTone}.
-Tareas actuales del usuario: ${JSON.stringify(tasks.slice(0, 5))}.
-${createdTask ? `Acabas de crear la tarea: "${createdTask.title}". Confírmala amablemente al usuario.` : ''}
-Responde de manera estructurada, cordial y orientada a la productividad. Máximo 150 palabras.`;
-
-    const requestBody = {
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: `${systemInstruction}\n\nMensaje del usuario: ${prompt}` }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 300,
-      },
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Gemini API Error: ${response.status} - ${errText}`);
-    }
-
-    const data = await response.json();
-    const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return candidateText || 'No se recibió texto del modelo Gemini.';
   },
 
   /**

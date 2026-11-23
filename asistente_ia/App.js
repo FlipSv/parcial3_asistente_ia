@@ -59,8 +59,12 @@ export default function App() {
 
     try {
       // 2. Process with AI Engine (Gemini / Contextual NLP)
-      const currentTasks = await storageService.getTasks();
-      const result = await aiEngine.processUserInput(text, settings, currentTasks);
+      const [currentTasks, currentSettings] = await Promise.all([
+        storageService.getTasks(),
+        storageService.getSettings(),
+      ]);
+      const activeSettings = currentSettings || settings;
+      const result = await aiEngine.processUserInput(text, activeSettings, currentTasks);
 
       // If a task was created by the AI engine, refresh task list
       if (result.createdTask) {

@@ -7,7 +7,9 @@ import {
   TextInput,
   TouchableOpacity,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
+import { aiEngine as aiEngineService } from '../services/aiEngine';
 
 export const SettingsScreen = ({
   settings,
@@ -19,8 +21,12 @@ export const SettingsScreen = ({
   const [userRole, setUserRole] = useState(settings?.userRole || 'Estudiante UDI');
   const [aiEngine, setAiEngine] = useState(settings?.aiEngine || 'contextual');
   const [geminiApiKey, setGeminiApiKey] = useState(settings?.geminiApiKey || '');
+  const [showKey, setShowKey] = useState(false);
+  const [isTestingKey, setIsTestingKey] = useState(false);
+  const [testResult, setTestResult] = useState(null);
   const [ollamaUrl, setOllamaUrl] = useState(settings?.ollamaUrl || 'http://10.0.2.2:11434');
   const [aiTone, setAiTone] = useState(settings?.aiTone || 'Empático y Motivador');
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
   const tones = [
     'Empático y Motivador',
@@ -29,7 +35,7 @@ export const SettingsScreen = ({
   ];
 
   const handleSave = () => {
-    onSaveSettings({
+    const updated = {
       ...settings,
       userName: userName.trim(),
       userRole: userRole.trim(),
@@ -37,8 +43,52 @@ export const SettingsScreen = ({
       geminiApiKey: geminiApiKey.trim(),
       ollamaUrl: ollamaUrl.trim(),
       aiTone,
-    });
+    };
+    onSaveSettings(updated);
+    setSaveSuccessMsg('✅ ¡Configuración guardada correctamente!');
+    setTimeout(() => setSaveSuccessMsg(''), 4000);
     Alert.alert('Éxito', 'Configuración guardada correctamente.');
+  };
+
+  const handleTestGeminiKey = async () => {
+    const key = geminiApiKey.trim();
+    if (!key) {
+      setTestResult({
+        success: false,
+        message: 'Por favor ingresa tu Clave API antes de probar.',
+      });
+      return;
+    }
+
+    setIsTestingKey(true);
+    setTestResult(null);
+
+    try {
+      const result = await aiEngineService.testGeminiConnection(key);
+      setTestResult(result);
+
+      if (result.success) {
+        // Automatically save when valid
+        const updated = {
+          ...settings,
+          userName: userName.trim(),
+          userRole: userRole.trim(),
+          aiEngine: 'gemini',
+          geminiApiKey: key,
+          ollamaUrl: ollamaUrl.trim(),
+          aiTone,
+        };
+        onSaveSettings(updated);
+        setSaveSuccessMsg('✅ Clave verificada y guardada como motor activo.');
+      }
+    } catch (e) {
+      setTestResult({
+        success: false,
+        message: `Error al probar: ${e.message}`,
+      });
+    } finally {
+      setIsTestingKey(false);
+    }
   };
 
   const handleConfirmReset = () => {
@@ -54,6 +104,12 @@ export const SettingsScreen = ({
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      {saveSuccessMsg ? (
+        <View style={styles.successBanner}>
+          <Text style={styles.successBannerText}>{saveSuccessMsg}</Text>
+        </View>
+      ) : null}
+
       {/* Profile Section */}
       <Text style={styles.sectionTitle}>Perfil de Usuario</Text>
       <View style={styles.card}>
@@ -104,7 +160,7 @@ export const SettingsScreen = ({
             {aiEngine === 'gemini' ? <View style={styles.radioInner} /> : null}
           </View>
           <View style={styles.engineTextWrap}>
-            <Text style={styles.engineTitle}>☁️ Google Gemini 1.5 Flash (Cloud API)</Text>
+            <Text style={styles.engineTitle}>☁️ Google Gemini (Cloud API)</Text>
             <Text style={styles.engineSubtitle}>
               Conecta directamente con la API oficial de Google para respuestas generativas avanzadas en la nube.
             </Text>
@@ -114,18 +170,64 @@ export const SettingsScreen = ({
         {aiEngine === 'gemini' && (
           <View style={styles.keyContainer}>
             <Text style={styles.label}>Clave API de Google Gemini:</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Pega aquí tu Gemini API Key (AIzaSy...)"
-              placeholderTextColor="#94A3B8"
-              value={geminiApiKey}
-              onChangeText={setGeminiApiKey}
-              secureTextEntry
-              autoCapitalize="none"
-            />
+            <View style={styles.keyInputRow}>
+              <TextInput
+                style={[styles.input, { flex: 1, marginBottom: 0 }]}
+                placeholder="Pega aquí tu clave (ej: AIzaSy...)"
+                placeholderTextColor="#94A3B8"
+                value={geminiApiKey}
+                onChangeText={setGeminiApiKey}
+                secureTextEntry={!showKey}
+                autoCapitalize="none"
+              />
+              <TouchableOpacity
+                style={styles.eyeBtn}
+                onPress={() => setShowKey(!showKey)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.eyeBtnText}>{showKey ? 'Ocultar' : 'Ver'}</Text>
+              </TouchableOpacity>
+            </View>
+
             <Text style={styles.helpText}>
-              * Se almacena de forma segura en el almacenamiento local del dispositivo.
+              * Debe ser una clave generada en Google AI Studio (aistudio.google.com).
             </Text>
+
+            {/* Test Key Button */}
+            <TouchableOpacity
+              style={[styles.testBtn, isTestingKey && styles.testBtnDisabled]}
+              onPress={handleTestGeminiKey}
+              disabled={isTestingKey}
+              activeOpacity={0.8}
+            >
+              {isTestingKey ? (
+                <View style={styles.testingRow}>
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                  <Text style={styles.testBtnText}> Probando conexión con Google...</Text>
+                </View>
+              ) : (
+                <Text style={styles.testBtnText}>🧪 Probar y Activar Clave API Ahora</Text>
+              )}
+            </TouchableOpacity>
+
+            {/* Test Result Message */}
+            {testResult && (
+              <View
+                style={[
+                  styles.testResultBox,
+                  testResult.success ? styles.testSuccessBox : styles.testErrorBox,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.testResultText,
+                    testResult.success ? styles.testSuccessText : styles.testErrorText,
+                  ]}
+                >
+                  {testResult.message}
+                </Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -220,6 +322,20 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 40,
   },
+  successBanner: {
+    backgroundColor: '#DCFCE7',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 12,
+  },
+  successBannerText: {
+    color: '#15803D',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
   sectionTitle: {
     fontSize: 14,
     fontWeight: '700',
@@ -251,6 +367,24 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 13,
     color: '#0F172A',
+  },
+  keyInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  eyeBtn: {
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginLeft: 8,
+  },
+  eyeBtnText: {
+    fontSize: 11,
+    color: '#475569',
+    fontWeight: '600',
   },
   engineOption: {
     flexDirection: 'row',
@@ -301,13 +435,62 @@ const styles = StyleSheet.create({
   },
   keyContainer: {
     marginTop: 8,
-    paddingLeft: 30,
+    paddingLeft: 10,
+    backgroundColor: '#F8FAFC',
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   helpText: {
     fontSize: 10.5,
     color: '#64748B',
     marginTop: 4,
     fontStyle: 'italic',
+  },
+  testBtn: {
+    backgroundColor: '#4F46E5',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  testBtnDisabled: {
+    backgroundColor: '#818CF8',
+  },
+  testBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  testingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  testResultBox: {
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+    borderWidth: 1,
+  },
+  testSuccessBox: {
+    backgroundColor: '#DCFCE7',
+    borderColor: '#86EFAC',
+  },
+  testErrorBox: {
+    backgroundColor: '#FEE2E2',
+    borderColor: '#FCA5A5',
+  },
+  testResultText: {
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
+  testSuccessText: {
+    color: '#15803D',
+    fontWeight: '600',
+  },
+  testErrorText: {
+    color: '#B91C1C',
   },
   tonesRow: {
     flexDirection: 'column',
